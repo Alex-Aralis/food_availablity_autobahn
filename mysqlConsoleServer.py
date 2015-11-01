@@ -1,4 +1,5 @@
 import time
+import signal
 from subprocess import Popen
 from twisted.internet.defer import inlineCallbacks
 from twisted.internet import reactor, task
@@ -10,39 +11,54 @@ def srv_log(msg):
 
 class Server(ApplicationSession):
     sessions = {}
+    watchdogs = {}
+    hunger = 5;
+
     @inlineCallbacks
     def onJoin(self, details):
         srv_log('server joined')
 
+        def closeSession(sessionName, exited=True):
+            srv_log('closing session ' + sessionName)
+            srv_log('current sessions ' + str(self.sessions))
+            srv_log('current watchdogs ' + str(self.watchdogs))
+            try:
+                #self.sessions[sessionName].terminate()
+                self.sessions[sessionName].send_signal(signal.SIGINT)
+                if exited:
+                    self.watchdogs[sessionName].cancel()
+
+                del self.watchdogs[sessionName]
+                del self.sessions[sessionName]
+                return 'session '+sessionName+' closed'
+            except Exception as e:
+                srv_log('error closing ' + sessionName)
+                srv_log(str(e))
+                return 'error closing session:' + str(e)
+
         def createSession():
-            global sessionCount
             srv_log('session requested')
             creation = str(int(time.time()*1000))
             self.sessions[creation] = Popen(['python','mysqlConsoleSession.py', creation])
-
-#            def monitor():
-#                if not (newP.poll() is None) :
-#                    srv_log('waiting for subproc to exit: ' + str(newP.poll()))
-#                    l.stop() 
-#                    newP.wait()
-#                    newP.terminate()
-
-#            l = task.LoopingCall(monitor)
-#            l.start(1)
+            self.watchdogs[creation] = reactor.callLater(self.hunger, closeSession, creation, False)
             srv_log('mysqlConsoleSession.py called: ' + creation)
             return creation
 
-        def closeSession(sessionName):
-            self.sessions[sessionName].terminate()
-            return 'session '+sessionName+' closed'
+
+
+        def giveBone(sessionName):
+            srv_log('bone given to ' + sessionName)
+            self.watchdogs[sessionName].cancel()
+            self.watchdogs[sessionName] = reactor.callLater(self.hunger, closeSession, sessionName, False)
+
+            return self.hunger;
 
         yield self.register(createSession, u'com.mysql.console.requestSession')
         yield self.register(closeSession, u'com.mysql.console.closeSession')
-#        except Exception  as e:
-#            srv_log(str(e))
-#            srv_log('it didnt work')
-
+        yield self.register(giveBone, u'com.mysql.console.giveBone')
+        
         srv_log('request session registered')
+
         
 
 if __name__ == '__main__':
