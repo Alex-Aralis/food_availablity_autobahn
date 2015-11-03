@@ -1,18 +1,23 @@
 import time
 import signal
+import mysql.connector as mariadb
 from subprocess import Popen
 from twisted.internet.defer import inlineCallbacks
 from twisted.internet import reactor, task
 from autobahn.twisted.util import sleep
 from autobahn.twisted.wamp import ApplicationSession, ApplicationRunner
+import base64
+from Crypto.Cipher import AES
 
 def srv_log(msg):
-    print('[server] ' + msg)
+    print('[server] ' + str(msg))
 
 class Server(ApplicationSession):
     sessions = {}
     watchdogs = {}
-    hunger = 5;
+    hunger = 30;
+#    rootConn = None;
+#    rootCursor = None;
 
     @inlineCallbacks
     def onJoin(self, details):
@@ -36,10 +41,27 @@ class Server(ApplicationSession):
                 srv_log(str(e))
                 return 'error closing session:' + str(e)
 
-        def createSession():
+        def createSession(accountSessionId, accountSessionEncPW):
             srv_log('session requested')
+            srv_log('accountSessionId: ' + str(int(accountSessionId)));
+            srv_log('accountSessionEncPW: ' + str(base64.b64decode(accountSessionEncPW)));
+            srv_log('accountSessionEncPW length: ' + str(len(base64.b64decode(accountSessionEncPW)[8:])));
+
+            self.rootCursor.execute("SELECT user_name, pw_enc_key, iv FROM account_sessions WHERE id=%s", 
+                                  (accountSessionId,))
+
+            accountUserName, pwEncKey, iv = self.rootCursor.fetchone()
+            
+            cipher = AES.new(bytes(pwEncKey), AES.MODE_CBC, bytes(iv))
+
+            unpad = lambda b : b[0:-b[-1]]
+
+            plaintextPw = unpad(cipher.decrypt(base64.b64decode(accountSessionEncPW))).decode()
+            
+            srv_log(accountUserName + ": " + plaintextPw);
+            
             creation = str(int(time.time()*1000))
-            self.sessions[creation] = Popen(['python','mysqlConsoleSession.py', creation])
+            self.sessions[creation] = Popen(['python','mysqlConsoleSession.py', creation, accountUserName, plaintextPw])
             self.watchdogs[creation] = reactor.callLater(self.hunger, closeSession, creation, False)
             srv_log('mysqlConsoleSession.py called: ' + creation)
             return creation
@@ -63,6 +85,17 @@ class Server(ApplicationSession):
 
 if __name__ == '__main__':
     srv_log('running as main')
+
+    srv_log('connecting to mariadb...')
+    Server.rootConn = mariadb.connect(user='root', password='skunkskunk2', database='food_account_data')
+    Server.rootCursor = Server.rootConn.cursor(buffered=True)
+    srv_log('mariadb connected.')
+
     serverRunner = ApplicationRunner(u'ws://localhost:8081/ws', u'realm1')
-    serverRunner.run(Server)
+    d = serverRunner.run(Server, False)
+    d.addErrback(srv_log)
+
+    reactor.run()
+    
+    srv_log('server proc ending')
 
