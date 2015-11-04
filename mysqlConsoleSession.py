@@ -26,11 +26,15 @@ class mysqlSession(ApplicationSession):
         def query(sql):
             
             try:
-                self.cursor.execute(sql)
+                cursor = self.conn.cursor(buffered=True)
+
+                cursor.execute(sql)
             
                 result = ''
-                for row in self.cursor:
+                for row in cursor:
                     result += str(row) + '<br>'
+
+                cursor.close()
 
                 return result;
 
@@ -48,7 +52,7 @@ if __name__ == '__main__':
 
     sess_log('creating mariadb connection')
     mysqlSession.conn = mariadb.connect(user=sys.argv[2], password=sys.argv[3], database='food_account_data')
-    mysqlSession.cursor = mysqlSession.conn.cursor(buffered=True)
+    #mysqlSession.cursor = mysqlSession.conn.cursor(buffered=True)
     sess_log('mariadb connection made')
 
     runner = ApplicationRunner(u'ws://localhost:8081/ws', u'realm1')
