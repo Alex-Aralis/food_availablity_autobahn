@@ -8,6 +8,7 @@ from autobahn.twisted.util import sleep
 from autobahn.twisted.wamp import ApplicationSession, ApplicationRunner
 import base64
 import sys
+import json
 
 
 import mysqlConsoleSession
@@ -50,17 +51,16 @@ class SessionThread(mariadb.MySQLConnection):
 
             cursor.execute(sql)
  
-            result = ''
-
-            for row in cursor:
-                result += str(row) + '<br>'
+            result = json.dumps(cursor.fetchall())
  
             cursor.close()
 
         except mariadb.errors.ProgrammingError as e:
             self.log(e)
             result = str(e)
-        
+        except Exception as e:
+            self.log(e)
+            result = str(e)
         finally:
             self.log('returning result')
             return result;
@@ -171,8 +171,9 @@ if __name__ == '__main__':
     srv_log('running as main')
 
     srv_log('connecting to mariadb...')
-    Server.rootConn = mariadb.connect(user='root', password='skunkskunk2', database='food_account_data')
-    #Server.rootCursor = Server.rootConn.cursor(buffered=True)
+    Server.rootConn = mariadb.connect(user='root', password='skunkskunk2', 
+      database='food_account_data')
+
     srv_log('mariadb connected.')
 
     serverRunner = ApplicationRunner(u'ws://localhost:8081/ws', u'realm1')
