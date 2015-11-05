@@ -48,22 +48,26 @@ class SessionThread(mariadb.MySQLConnection):
 
         try:
             cursor = self.cursor(buffered=True)
+            resDict =  {}
 
             cursor.execute(sql)
  
-            result = json.dumps(cursor.fetchall())
+
+            resDict['columnNames'] = cursor.column_names
+            resDict['warnings'] = cursor.fetchwarnings()
+            resDict['rows'] = cursor.fetchall()
  
             cursor.close()
 
         except mariadb.errors.ProgrammingError as e:
             self.log(e)
-            result = str(e)
+            resDict['error'] = str(e)
         except Exception as e:
             self.log(e)
-            result = str(e)
+            resDict['error'] = str(e)
         finally:
             self.log('returning result')
-            return result;
+            return json.dumps(resDict);
 
         
     def threadedWampQuery(self, sql):
