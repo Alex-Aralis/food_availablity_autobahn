@@ -8,6 +8,7 @@ from autobahn.twisted.util import sleep
 from autobahn.twisted.wamp import ApplicationSession, ApplicationRunner
 import base64
 import sys
+import ujson
 import json
 
 
@@ -20,14 +21,14 @@ unpad = lambda b : b[0:-b[-1]]
 def srv_log(msg):
     print('[server] ' + str(msg))
 
-class SessionThread(mariadb.MySQLConnection):
+class SessionThread:
     def __init__(self, wampAppSess, timeout, **kwargs):
         
         self.log('initing new session')
 
         self.log('initing new session with' + str(kwargs))
-        super().__init__(**kwargs)
-        self.log('MySQLConnection initialized')
+        self.conn = mariadb.connect(**kwargs)
+        self.log('conn initialized')
 
         self.log('initing with timeout=' + str(timeout))
         self.timeout = timeout
@@ -39,7 +40,7 @@ class SessionThread(mariadb.MySQLConnection):
 
     def log(self, msg):
         try:
-            print('[session ' + str(self.connection_id) + '] ' + str(msg))
+            print('[session ' + str(self.conn.connection_id) + '] ' + str(msg))
         except Exception: 
             print('[session ?] ' + str(msg))
         
@@ -47,7 +48,7 @@ class SessionThread(mariadb.MySQLConnection):
         self.log('wamp query recieved: ' + str(sql));
 
         try:
-            cursor = self.cursor(buffered=True)
+            cursor = self.conn.cursor(buffered=True)
             resDict =  {}
 
             cursor.execute(sql)
@@ -66,9 +67,10 @@ class SessionThread(mariadb.MySQLConnection):
             self.log(e)
             resDict['error'] = str(e)
         finally:
+            self.log('json encoding')
+            jsons = ujson.dumps(resDict)
             self.log('returning result')
-            return json.dumps(resDict);
-
+            return jsons
         
     def threadedWampQuery(self, sql):
         self.log('threaded query request recieved')
@@ -82,12 +84,12 @@ class SessionThread(mariadb.MySQLConnection):
             self.watchdog.cancel()
 
         try:
-            self.disconnect()
+            self.conn.disconnect()
             self.log('disconnected from mysql server')
             return 0
         except Exception as e:
             self.log('disconnect failed, attempting shutdown')
-            sess.shutdown()
+            sess.conn.shutdown()
             return 1
 
 
@@ -136,16 +138,16 @@ class Server(ApplicationSession):
             srv_log(accountUserName + ": " + plaintextPw);
            
             sess = SessionThread(self, self.hunger, user=accountUserName,  
-                password=plaintextPw, database='food_account_data')
+                password=plaintextPw, use_pure=False)
              
           
-            self.sessions[sess.connection_id] = sess 
+            self.sessions[sess.conn.connection_id] = sess 
 
            
-            srv_log('new SessionThread called: ' + str(sess.connection_id))
+            srv_log('new SessionThread called: ' + str(sess.conn.connection_id))
 
 
-            return sess.connection_id;
+            return sess.conn.connection_id;
 
 
 
@@ -176,7 +178,7 @@ if __name__ == '__main__':
 
     srv_log('connecting to mariadb...')
     Server.rootConn = mariadb.connect(user='root', password='skunkskunk2', 
-      database='food_account_data')
+      database='food_account_data', use_pure=False)
 
     srv_log('mariadb connected.')
 
