@@ -12,14 +12,10 @@ import ujson
 import json
 
 
-import mysqlConsoleSession
-
 from Crypto.Cipher import AES
 
 unpad = lambda b : b[0:-b[-1]]
 
-def srv_log(msg):
-    print('[server] ' + str(msg))
 
 class SessionThread:
     def __init__(self, wampAppSess, timeout, **kwargs):
@@ -35,7 +31,7 @@ class SessionThread:
         self.wampAppSess = wampAppSess
 
         self.log('setting watchdog')
-        self.watchdog = reactor.callLater(timeout, self.cleanup)
+        self.watchdog = reactor.callLater(timeout, self.cleanup, True)
         self.log('init complete')
 
     def log(self, msg):
@@ -47,9 +43,10 @@ class SessionThread:
     def wampQuery(self, sql):
         self.log('wamp query recieved: ' + str(sql));
 
+        resDict =  {}
+
         try:
             cursor = self.conn.cursor(buffered=True)
-            resDict =  {}
 
             cursor.execute(sql)
  
@@ -77,10 +74,10 @@ class SessionThread:
         return threads.deferToThread(self.wampQuery, sql)
         self.log('query thread spun')
 
-    def cleanup(self, exited):
+    def cleanup(self, Timedout):
         self.log('cleanup entered')
 
-        if exited: 
+        if not Timedout: 
             self.watchdog.cancel()
 
         try:
@@ -97,34 +94,56 @@ class Server(ApplicationSession):
     sessions = {}
     hunger = 30;
 
-    def closeSession(self, sessionName, exited=True):
-        srv_log('closing session ' + str(sessionName))
-        srv_log('current sessions ' + str(self.sessions))
+    def log(self, msg):
         try:
-            self.sessions[sessionName].cleanup(exited)
+            print('[server ' + str(self.rootConn.connection_id) + '] ' + str(msg))
+        except Exception:
+            print('[server ?] ' + str(msg))
+
+    def padder(self, func, msg):
+        def padded(*argv, **kwargs):
+            try:
+                return func(*argv, **kwargs)
+            except Exception as e:
+                self.log(msg)
+                self.log(str(e))
+
+        return padded
+
+    def closeSession(self, sessionName, timedout=True):
+        self.log('closing session ' + str(sessionName))
+        self.log('current sessions ' + str(self.sessions))
+        try:
+            self.sessions[sessionName].cleanup(timedout)
 
             del self.sessions[sessionName]
 
             return 'session '+str(sessionName)+' closed'
         except Exception as e:
-            srv_log('error closing ' + str(sessionName))
-            srv_log(str(e))
+            self.log('error closing ' + str(sessionName))
+            self.log(str(e))
             return 'error closing session:' + str(e)
 
     @inlineCallbacks
     def onJoin(self, details):
-        srv_log('server joined')
+        self.log('server joined')
 
 
         def createSession(accountSessionId, accountSessionEncPW):
-            srv_log('session requested')
-            srv_log('accountSessionId: ' + str(int(accountSessionId)));
-            srv_log('accountSessionEncPW: ' + str(base64.b64decode(accountSessionEncPW)));
-            srv_log('accountSessionEncPW length: ' + str(len(base64.b64decode(accountSessionEncPW))));
-
+            self.log('session requested')
+            self.log('accountSessionId: ' + str(int(accountSessionId)));
             
-            rootCursor = self.rootConn.cursor(buffered=True)
+            self.log(self.rootConn.reconnect())
 
+            try:
+                rootCursor = self.rootConn.cursor(buffered=True)
+            except mariadb.errors.OperationalError as e:
+                self.log('rootConn failed to create cursor.')
+                self.log(e)
+                self.log('attempting reconnect with mysql server...') 
+                self.log(self.rootConn.reconnect())
+                rootCursor = self.rootConn.cursor(buffered=True)
+            
             rootCursor.execute("SELECT user_name, pw_enc_key, iv FROM account_sessions WHERE id=%s", 
                                   (accountSessionId,))
 
@@ -132,10 +151,9 @@ class Server(ApplicationSession):
             
             cipher = AES.new(bytes(pwEncKey), AES.MODE_CBC, bytes(iv))
 
-
             plaintextPw = unpad(cipher.decrypt(base64.b64decode(accountSessionEncPW))).decode()
             
-            srv_log(accountUserName + ": " + plaintextPw);
+            self.log(accountUserName + ": " + plaintextPw);
            
             sess = SessionThread(self, self.hunger, user=accountUserName,  
                 password=plaintextPw, use_pure=False)
@@ -144,7 +162,7 @@ class Server(ApplicationSession):
             self.sessions[sess.conn.connection_id] = sess 
 
            
-            srv_log('new SessionThread called: ' + str(sess.conn.connection_id))
+            self.log('new SessionThread called: ' + str(sess.conn.connection_id))
 
 
             return sess.conn.connection_id;
@@ -152,41 +170,50 @@ class Server(ApplicationSession):
 
 
         def giveBone(sessionName):
-            srv_log('bone given to ' + str(sessionName))
-            self.sessions[sessionName].watchdog.cancel()
-            self.sessions[sessionName].watchdog = reactor.callLater(self.hunger, self.closeSession, sessionName, False)
-
-            return self.hunger;
+            self.log('bone given to ' + str(sessionName))
+            if (sessionName in self.sessions):
+                self.sessions[sessionName].watchdog.cancel()
+                self.sessions[sessionName].watchdog = reactor.callLater(self.hunger, self.closeSession, sessionName, True)
+                return self.hunger;
+            else:
+                self.log('unknown name refused bone');
+                return -1;
 
         @inlineCallbacks
         def querySession(sessionName, sql):
-            res =  yield self.sessions[sessionName].threadedWampQuery(sql)
+            d = self.sessions[sessionName].threadedWampQuery(sql)
+            d.addErrback(self.log)
+            res =  yield d
             return res
   
             
-        yield self.register(createSession, u'com.mysql.console.requestSession')
-        yield self.register(self.closeSession, u'com.mysql.console.closeSession')
-        yield self.register(giveBone, u'com.mysql.console.giveBone')
-        yield self.register(querySession, u'com.mysql.console.query')
+        yield self.register(self.padder(createSession,'Session creation failed!!!'), 
+          u'com.mysql.console.requestSession')
+        yield self.register(self.padder(self.closeSession, 'Session closing failed!!!'),
+          u'com.mysql.console.closeSession')
+        yield self.register(self.padder(giveBone, 'Session give bone failed!!!'), 
+          u'com.mysql.console.giveBone')
+        yield self.register(querySession, 
+          u'com.mysql.console.query')
         
-        srv_log('request session registered')
+        self.log('request session registered')
 
         
 
 if __name__ == '__main__':
-    srv_log('running as main')
+    print('running as main')
 
-    srv_log('connecting to mariadb...')
+    print('connecting to mariadb...')
     Server.rootConn = mariadb.connect(user='root', password='skunkskunk2', 
       database='food_account_data', use_pure=False)
 
-    srv_log('mariadb connected.')
+    print('root connected to mariadb.')
 
     serverRunner = ApplicationRunner(u'ws://localhost:8081/ws', u'realm1')
     d = serverRunner.run(Server, False)
-    d.addErrback(srv_log)
+    d.addErrback(print)
 
     reactor.run()
     
-    srv_log('server proc ending')
+    print('server proc ending')
 
